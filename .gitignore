@@ -56,8 +56,8 @@ pids
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
-# BrainX code review (local pipeline output)
-.code-reviews/
+
+.code-reviews/brainx-review.md
 
 # Local AI assistant settings
 .claude/settings.local.json
