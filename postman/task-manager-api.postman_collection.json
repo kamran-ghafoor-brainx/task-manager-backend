@@ -1,0 +1,1486 @@
+{
+  "info": {
+    "_postman_id": "2a45d1ce-f00c-45e7-999c-fda04b063124",
+    "name": "Task Manager API",
+    "description": "Every route of the Task Manager API, **one request per route**.\n\n**Setup:** `docker compose up -d` (Postgres + Mailpit), `npm run start:dev`, then select the **Task Manager API \u00b7 Local** environment.\n\n**Run order:** the folders are numbered. Run the whole collection with the Collection Runner, or send the requests top to bottom. Tokens and ids are saved to collection variables automatically.\n\n**Two users:** user A (`{{accessToken}}`) is created in 01 \u00b7 Auth. User B (`{{accessToken2}}`) is created by the pre-request script of Create invitation.\n\n**Auth:** the collection uses Bearer `{{accessToken}}`. Public routes are set to No Auth; user B's requests override it with `{{accessToken2}}`.\n\n**Responses:** success bodies are wrapped in `{ data: ... }`; errors are `{ error: { code, message, requestId } }`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs after every request: the rules every endpoint follows",
+          "pm.test('No server error', () => pm.expect(pm.response.code).to.be.below(500));",
+          "",
+          "if (pm.response.code >= 400) {",
+          "  pm.test('Error has code, message and requestId', () => {",
+          "    const error = pm.response.json().error;",
+          "    pm.expect(error).to.have.property('code');",
+          "    pm.expect(error).to.have.property('message');",
+          "    pm.expect(error).to.have.property('requestId');",
+          "  });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "00 \u00b7 Health",
+      "description": "Checks that the API and the database are up. No token needed.",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Returns `{ status: 'ok', database: 'up' }`, or 503 `DATABASE_UNAVAILABLE`.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 \u00b7 Auth",
+      "description": "Account lifecycle for **user A** (the task owner in later folders).\n\nRun in order: Register \u2192 Resend verification \u2192 Verify email \u2192 Forgot password \u2192 Reset password \u2192 Login \u2192 Me.\n\nVerify email and Reset password read their token from Mailpit automatically (pre-request script), so Mailpit must be running (`docker compose up -d`).",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Creates an account and returns `{ user, accessToken }`. Sends a verification email.\n\nThe pre-request script generates a fresh email and username every run, so this never fails with 'already taken'. Rate limit: 5 per minute.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Alice Owner\",\n  \"username\": \"{{username}}\",\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A fresh email and username on every run, so Register never fails with \"already taken\"",
+                  "const suffix = Date.now().toString().slice(-8);",
+                  "pm.collectionVariables.set('email', `owner${suffix}@example.com`);",
+                  "pm.collectionVariables.set('username', `owner_${suffix}`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  const data = pm.response.json().data;",
+                  "  pm.collectionVariables.set('accessToken', data.accessToken);",
+                  "  pm.collectionVariables.set('userId', data.user.id);",
+                  "  // Login uses currentPassword, because Reset password changes it later",
+                  "  pm.collectionVariables.set('currentPassword', pm.variables.get('password'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resend verification",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/resend-verification",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "resend-verification"
+              ]
+            },
+            "description": "Sends a new verification email to the logged-in, **unverified** user. Returns 202.\n\nOne email per minute: right after Register this returns **429** (cooldown). After verifying it returns **409** (already verified). Both are expected."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted (429 within 60s of the last email)', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([202, 429]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Verify email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/verify-email",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "verify-email"
+              ]
+            },
+            "description": "Marks the email as verified using the token from the email link. Returns 204.\n\nThe pre-request script reads the newest verification token for `{{email}}` from Mailpit. After this, user A can use every protected route.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{verifyToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Finds the newest email with this subject sent to `to` in Mailpit (the local mail catcher),",
+                  "// and passes the 64-character token from the link inside it to `done`.",
+                  "function getTokenFromMailpit(to, subject, done) {",
+                  "  const mailpitUrl = pm.variables.get('mailpitUrl');",
+                  "  const query = encodeURIComponent(`to:\"${to}\" subject:\"${subject}\"`);",
+                  "",
+                  "  pm.sendRequest(`${mailpitUrl}/api/v1/search?query=${query}`, (err, res) => {",
+                  "    if (err) throw err;",
+                  "    const messages = res.json().messages || [];",
+                  "    if (messages.length === 0) {",
+                  "      throw new Error(`No \"${subject}\" email for ${to} in Mailpit. Is Mailpit running?`);",
+                  "    }",
+                  "",
+                  "    // Mailpit lists the newest message first",
+                  "    pm.sendRequest(`${mailpitUrl}/api/v1/message/${messages[0].ID}`, (err2, msg) => {",
+                  "      if (err2) throw err2;",
+                  "      const match = msg.json().Text.match(/token=([a-f0-9]{64})/);",
+                  "      if (!match) throw new Error('No token found in the email');",
+                  "      done(match[1]);",
+                  "    });",
+                  "  });",
+                  "}",
+                  "",
+                  "// Short wait so the email from Register / Resend has reached Mailpit",
+                  "setTimeout(() => {",
+                  "  getTokenFromMailpit(pm.collectionVariables.get('email'), 'Verify your email address', (token) => {",
+                  "    pm.collectionVariables.set('verifyToken', token);",
+                  "  });",
+                  "}, 500);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forgot password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/forgot-password",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "forgot-password"
+              ]
+            },
+            "description": "Sends a password reset email if the address has an account. Always returns 200 with the same message, so it never reveals whether an email is registered.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reset password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/reset-password",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "reset-password"
+              ]
+            },
+            "description": "Sets a new password with the token from the reset email. Returns 204.\n\nThe pre-request script reads the reset token from Mailpit. **This signs the user out everywhere**: the old access token stops working, so run **Login** next.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{resetToken}}\",\n  \"password\": \"{{newPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Finds the newest email with this subject sent to `to` in Mailpit (the local mail catcher),",
+                  "// and passes the 64-character token from the link inside it to `done`.",
+                  "function getTokenFromMailpit(to, subject, done) {",
+                  "  const mailpitUrl = pm.variables.get('mailpitUrl');",
+                  "  const query = encodeURIComponent(`to:\"${to}\" subject:\"${subject}\"`);",
+                  "",
+                  "  pm.sendRequest(`${mailpitUrl}/api/v1/search?query=${query}`, (err, res) => {",
+                  "    if (err) throw err;",
+                  "    const messages = res.json().messages || [];",
+                  "    if (messages.length === 0) {",
+                  "      throw new Error(`No \"${subject}\" email for ${to} in Mailpit. Is Mailpit running?`);",
+                  "    }",
+                  "",
+                  "    // Mailpit lists the newest message first",
+                  "    pm.sendRequest(`${mailpitUrl}/api/v1/message/${messages[0].ID}`, (err2, msg) => {",
+                  "      if (err2) throw err2;",
+                  "      const match = msg.json().Text.match(/token=([a-f0-9]{64})/);",
+                  "      if (!match) throw new Error('No token found in the email');",
+                  "      done(match[1]);",
+                  "    });",
+                  "  });",
+                  "}",
+                  "",
+                  "// Short wait so the email from Forgot password has reached Mailpit",
+                  "setTimeout(() => {",
+                  "  getTokenFromMailpit(pm.collectionVariables.get('email'), 'Reset your Task Manager password', (token) => {",
+                  "    pm.collectionVariables.set('resetToken', token);",
+                  "  });",
+                  "}, 500);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "if (pm.response.code === 204) {",
+                  "  // From now on Login must use the new password",
+                  "  pm.collectionVariables.set('currentPassword', pm.variables.get('newPassword'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Logs in and returns `{ user, accessToken }`. The token is saved to `{{accessToken}}` and used by every later request. Rate limit: 5 per minute.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{currentPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  pm.collectionVariables.set('accessToken', pm.response.json().data.accessToken);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Returns the logged-in user's public profile. Works even before the email is verified."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 \u00b7 Tasks",
+      "description": "Task CRUD as user A. Requires a verified email (run 01 \u00b7 Auth first).\n\nCreate task saves `{{taskId}}`; the other requests use it. Delete task removes it.",
+      "item": [
+        {
+          "name": "Create task",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks"
+              ]
+            },
+            "description": "Creates a task owned by the logged-in user. Only `title` is required. `deadlineAt` must be in the future; `status` defaults to `todo`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Write the project report\",\n  \"description\": \"First draft for the team\",\n  \"deadlineAt\": \"{{futureDeadline}}\",\n  \"status\": \"todo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A deadline 7 days from now, because past deadlines are rejected",
+                  "const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);",
+                  "pm.collectionVariables.set('futureDeadline', nextWeek.toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('taskId', pm.response.json().data.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List tasks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks?page=1&limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "1-based page number"
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "1 to 100 (default 20)"
+                },
+                {
+                  "key": "scope",
+                  "value": "all",
+                  "description": "all | owned | shared",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "todo",
+                  "description": "todo | in_progress | done",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "report",
+                  "description": "Case-insensitive search in the title",
+                  "disabled": true
+                },
+                {
+                  "key": "sort",
+                  "value": "deadline",
+                  "description": "createdAt | deadline",
+                  "disabled": true
+                },
+                {
+                  "key": "order",
+                  "value": "asc",
+                  "description": "asc | desc",
+                  "disabled": true
+                },
+                {
+                  "key": "dueAfter",
+                  "value": "2026-01-01T00:00:00Z",
+                  "description": "ISO 8601 date",
+                  "disabled": true
+                },
+                {
+                  "key": "dueBefore",
+                  "value": "2099-01-01T00:00:00Z",
+                  "description": "ISO 8601 date",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Tasks the user owns and/or collaborates on, paginated. Enable the optional query parameters in the Params tab to filter, search and sort."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get task",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{taskId}}"
+              ]
+            },
+            "description": "One task, if the user is its owner or a collaborator. Otherwise 404."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update task",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{taskId}}"
+              ]
+            },
+            "description": "Owner only. Send only the fields to change. `deadlineAt: null` removes the deadline. Collaborators get a `task.updated` notification.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Write the final project report\",\n  \"description\": \"Ready for review\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Change task status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}/status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{taskId}}",
+                "status"
+              ]
+            },
+            "description": "Owner or collaborator. `todo` | `in_progress` | `done`. Moving to `done` sets `completedAt`. Everyone else on the task gets a `task.status_changed` notification.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"in_progress\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete task",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{taskId}}"
+              ]
+            },
+            "description": "Owner only. Deletes the task permanently. Collaborators get a `task.deleted` notification."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 \u00b7 Invitations",
+      "description": "Sharing a task. **User A** (owner, `{{accessToken}}`) invites **user B** (collaborator, `{{accessToken2}}`).\n\nCreate invitation's pre-request script creates the shared task (`{{collabTaskId}}`) and registers + verifies user B through Mailpit. Run this folder in order.",
+      "item": [
+        {
+          "name": "Create invitation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{collabTaskId}}/invitations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{collabTaskId}}",
+                "invitations"
+              ]
+            },
+            "description": "Owner only. Invite by `username` **or** `email` (exactly one). An email without an account is allowed; it is linked when that person signs up and verifies. User B gets an `invitation.received` notification.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username2}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Finds the newest email with this subject sent to `to` in Mailpit (the local mail catcher),",
+                  "// and passes the 64-character token from the link inside it to `done`.",
+                  "function getTokenFromMailpit(to, subject, done) {",
+                  "  const mailpitUrl = pm.variables.get('mailpitUrl');",
+                  "  const query = encodeURIComponent(`to:\"${to}\" subject:\"${subject}\"`);",
+                  "",
+                  "  pm.sendRequest(`${mailpitUrl}/api/v1/search?query=${query}`, (err, res) => {",
+                  "    if (err) throw err;",
+                  "    const messages = res.json().messages || [];",
+                  "    if (messages.length === 0) {",
+                  "      throw new Error(`No \"${subject}\" email for ${to} in Mailpit. Is Mailpit running?`);",
+                  "    }",
+                  "",
+                  "    // Mailpit lists the newest message first",
+                  "    pm.sendRequest(`${mailpitUrl}/api/v1/message/${messages[0].ID}`, (err2, msg) => {",
+                  "      if (err2) throw err2;",
+                  "      const match = msg.json().Text.match(/token=([a-f0-9]{64})/);",
+                  "      if (!match) throw new Error('No token found in the email');",
+                  "      done(match[1]);",
+                  "    });",
+                  "  });",
+                  "}",
+                  "",
+                  "// Sends a JSON POST to the API. token is optional (null for public routes).",
+                  "function postJson(path, body, token, done) {",
+                  "  const header = { 'Content-Type': 'application/json' };",
+                  "  if (token) header.Authorization = `Bearer ${token}`;",
+                  "",
+                  "  pm.sendRequest(",
+                  "    {",
+                  "      url: pm.variables.get('baseUrl') + path,",
+                  "      method: 'POST',",
+                  "      header,",
+                  "      body: { mode: 'raw', raw: JSON.stringify(body) },",
+                  "    },",
+                  "    (err, res) => {",
+                  "      if (err) throw err;",
+                  "      done(res);",
+                  "    },",
+                  "  );",
+                  "}",
+                  "",
+                  "// This request needs two things no earlier request creates:",
+                  "//   1. a task to share   \u2192 {{collabTaskId}}",
+                  "//   2. a second verified user to invite (user B) \u2192 {{username2}}, {{accessToken2}}, {{userId2}}",
+                  "// Both are created here, so the collection keeps exactly one request per route.",
+                  "const ownerToken = pm.collectionVariables.get('accessToken');",
+                  "const password = pm.variables.get('password');",
+                  "",
+                  "postJson('/tasks', { title: 'Shared task for collaboration' }, ownerToken, (res) => {",
+                  "  if (res.code !== 201) throw new Error('Could not create the shared task: ' + res.text());",
+                  "  pm.collectionVariables.set('collabTaskId', res.json().data.id);",
+                  "});",
+                  "",
+                  "const suffix = Date.now().toString().slice(-8);",
+                  "const email2 = `collab${suffix}@example.com`;",
+                  "const username2 = `collab_${suffix}`;",
+                  "",
+                  "postJson('/auth/register', { name: 'Bob Collaborator', username: username2, email: email2, password }, null, (res) => {",
+                  "  if (res.code !== 201) throw new Error('Could not register user B: ' + res.text());",
+                  "  pm.collectionVariables.set('email2', email2);",
+                  "  pm.collectionVariables.set('username2', username2);",
+                  "  pm.collectionVariables.set('userId2', res.json().data.user.id);",
+                  "  // The register token keeps working after verification (it is checked against the database)",
+                  "  pm.collectionVariables.set('accessToken2', res.json().data.accessToken);",
+                  "",
+                  "  // Give the verification email a moment to reach Mailpit, then verify user B",
+                  "  setTimeout(() => {",
+                  "    getTokenFromMailpit(email2, 'Verify your email address', (token) => {",
+                  "      postJson('/auth/verify-email', { token }, null, (verifyRes) => {",
+                  "        if (verifyRes.code !== 204) throw new Error('Could not verify user B: ' + verifyRes.text());",
+                  "      });",
+                  "    });",
+                  "  }, 1000);",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('invitationId', pm.response.json().data.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List task invitations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{collabTaskId}}/invitations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{collabTaskId}}",
+                "invitations"
+              ]
+            },
+            "description": "Owner only. Pending invitations of the task, newest first."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My invitations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/invitations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "invitations"
+              ]
+            },
+            "description": "**As user B.** My pending, unexpired invitations, with task title and inviter name.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken2}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Decline invitation",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/invitations/{{invitationId}}/decline",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "invitations",
+                "{{invitationId}}",
+                "decline"
+              ]
+            },
+            "description": "**As user B.** Declines the invitation. User A gets an `invitation.declined` notification.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken2}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Accept invitation",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/invitations/{{invitationId}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "invitations",
+                "{{invitationId}}",
+                "accept"
+              ]
+            },
+            "description": "**As user B.** Accepts the invitation and becomes a collaborator. User A gets an `invitation.accepted` notification.\n\nThe pre-request script sends a fresh invitation first, because Decline used up the first one.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken2}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Sends a JSON POST to the API. token is optional (null for public routes).",
+                  "function postJson(path, body, token, done) {",
+                  "  const header = { 'Content-Type': 'application/json' };",
+                  "  if (token) header.Authorization = `Bearer ${token}`;",
+                  "",
+                  "  pm.sendRequest(",
+                  "    {",
+                  "      url: pm.variables.get('baseUrl') + path,",
+                  "      method: 'POST',",
+                  "      header,",
+                  "      body: { mode: 'raw', raw: JSON.stringify(body) },",
+                  "    },",
+                  "    (err, res) => {",
+                  "      if (err) throw err;",
+                  "      done(res);",
+                  "    },",
+                  "  );",
+                  "}",
+                  "",
+                  "// Decline invitation used up the first invitation, so user A invites user B again here.",
+                  "// Allowed: user B declined, so there is no pending invitation and they are not a collaborator.",
+                  "const taskId = pm.collectionVariables.get('collabTaskId');",
+                  "const body = { username: pm.collectionVariables.get('username2') };",
+                  "",
+                  "postJson(`/tasks/${taskId}/invitations`, body, pm.collectionVariables.get('accessToken'), (res) => {",
+                  "  if (res.code !== 201) throw new Error('Could not re-invite user B: ' + res.text());",
+                  "  pm.collectionVariables.set('invitationId', res.json().data.id);",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Revoke invitation",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{collabTaskId}}/invitations/{{revokeInvitationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{collabTaskId}}",
+                "invitations",
+                "{{revokeInvitationId}}"
+              ]
+            },
+            "description": "Owner only. Cancels a pending invitation. The pre-request script creates one to an email without an account, since user B's invitation is already accepted."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Sends a JSON POST to the API. token is optional (null for public routes).",
+                  "function postJson(path, body, token, done) {",
+                  "  const header = { 'Content-Type': 'application/json' };",
+                  "  if (token) header.Authorization = `Bearer ${token}`;",
+                  "",
+                  "  pm.sendRequest(",
+                  "    {",
+                  "      url: pm.variables.get('baseUrl') + path,",
+                  "      method: 'POST',",
+                  "      header,",
+                  "      body: { mode: 'raw', raw: JSON.stringify(body) },",
+                  "    },",
+                  "    (err, res) => {",
+                  "      if (err) throw err;",
+                  "      done(res);",
+                  "    },",
+                  "  );",
+                  "}",
+                  "",
+                  "// Revoking needs a PENDING invitation. User B already accepted, so invite an email that has",
+                  "// no account yet (allowed: it becomes a pending invitation waiting for sign-up).",
+                  "const taskId = pm.collectionVariables.get('collabTaskId');",
+                  "const body = { email: `pending${Date.now()}@example.com` };",
+                  "",
+                  "postJson(`/tasks/${taskId}/invitations`, body, pm.collectionVariables.get('accessToken'), (res) => {",
+                  "  if (res.code !== 201) throw new Error('Could not create an invitation to revoke: ' + res.text());",
+                  "  pm.collectionVariables.set('revokeInvitationId', res.json().data.id);",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 \u00b7 Collaborators",
+      "description": "Who is collaborating on the shared task. Uses `{{collabTaskId}}` and user B from 03 \u00b7 Invitations.",
+      "item": [
+        {
+          "name": "List collaborators",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{collabTaskId}}/collaborators",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{collabTaskId}}",
+                "collaborators"
+              ]
+            },
+            "description": "Owner or collaborator. Everyone collaborating on the task, oldest first."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Remove collaborator",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{collabTaskId}}/collaborators/{{userId2}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tasks",
+                "{{collabTaskId}}",
+                "collaborators",
+                "{{userId2}}"
+              ]
+            },
+            "description": "The owner can remove anyone; a collaborator can only remove themselves (leave). Here user A removes user B, who gets a `collaborator.removed` notification."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 \u00b7 Notifications",
+      "description": "User A's notification inbox. After 03 \u00b7 Invitations, user A has at least `invitation.declined` and `invitation.accepted` notifications.\n\n**Real-time (Socket.IO):** not part of this collection (Postman collections can't hold Socket.IO requests). In Postman: New \u2192 Socket.IO, URL `http://localhost:3000/realtime`, Settings \u2192 Handshake auth `{\"token\": \"<accessToken>\"}`, listen for `notification.created`.",
+      "item": [
+        {
+          "name": "List notifications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications?page=1&limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "1-based page number"
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "1 to 50 (default 20)"
+                }
+              ]
+            },
+            "description": "My notifications, newest first, with `total` for pagination. Saves the newest id."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const items = pm.response.json().data.items;",
+                  "  // Saved for \"Mark notification read\"",
+                  "  if (items.length > 0) pm.collectionVariables.set('notificationId', items[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unread count",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/unread-count",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "unread-count"
+              ]
+            },
+            "description": "Returns `{ count }`: how many of my notifications are unread (for a badge)."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark notification read",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/{{notificationId}}/read",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "{{notificationId}}",
+                "read"
+              ]
+            },
+            "description": "Marks one of my notifications as read and returns it. Another user's id returns 404."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark all notifications read",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/read-all",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "read-all"
+              ]
+            },
+            "description": "Marks all my unread notifications as read. Returns 204."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "email",
+      "value": "",
+      "type": "string",
+      "description": "Set by Register"
+    },
+    {
+      "key": "username",
+      "value": "",
+      "type": "string",
+      "description": "Set by Register"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string",
+      "description": "Set by Register"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string",
+      "description": "Set by Register and Login (user A)"
+    },
+    {
+      "key": "currentPassword",
+      "value": "",
+      "type": "string",
+      "description": "Set by Register, changed by Reset password"
+    },
+    {
+      "key": "verifyToken",
+      "value": "",
+      "type": "string",
+      "description": "Read from Mailpit by Verify email"
+    },
+    {
+      "key": "resetToken",
+      "value": "",
+      "type": "string",
+      "description": "Read from Mailpit by Reset password"
+    },
+    {
+      "key": "futureDeadline",
+      "value": "",
+      "type": "string",
+      "description": "Set by Create task"
+    },
+    {
+      "key": "taskId",
+      "value": "",
+      "type": "string",
+      "description": "Set by Create task"
+    },
+    {
+      "key": "collabTaskId",
+      "value": "",
+      "type": "string",
+      "description": "Set by Create invitation"
+    },
+    {
+      "key": "email2",
+      "value": "",
+      "type": "string",
+      "description": "User B, set by Create invitation"
+    },
+    {
+      "key": "username2",
+      "value": "",
+      "type": "string",
+      "description": "User B, set by Create invitation"
+    },
+    {
+      "key": "userId2",
+      "value": "",
+      "type": "string",
+      "description": "User B, set by Create invitation"
+    },
+    {
+      "key": "accessToken2",
+      "value": "",
+      "type": "string",
+      "description": "User B, set by Create invitation"
+    },
+    {
+      "key": "invitationId",
+      "value": "",
+      "type": "string",
+      "description": "Set by Create invitation / Accept invitation"
+    },
+    {
+      "key": "revokeInvitationId",
+      "value": "",
+      "type": "string",
+      "description": "Set by Revoke invitation"
+    },
+    {
+      "key": "notificationId",
+      "value": "",
+      "type": "string",
+      "description": "Set by List notifications"
+    }
+  ]
+}
